@@ -55,7 +55,7 @@ class QBittorrentClient:
             return False
     
     def get_torrents(self):
-        """Get list of all torrents"""
+        """Get list of all torrents not tagged with 'GGn-Sorted'"""
         if not self.logged_in:
             logger.error("Not logged in to qBittorrent")
             return None
@@ -63,9 +63,16 @@ class QBittorrentClient:
         response = self.session.get(f"{self.host}/api/v2/torrents/info", timeout=10)
         
         if response.status_code == 200:
-            torrents = response.json()
-            logger.info(f"Retrieved {len(torrents)} torrents")
-            return torrents
+            all_torrents = response.json()
+            # Filter out torrents already tagged with "GGn-Sorted"
+            filtered_torrents = []
+            for torrent in all_torrents:
+                tags = torrent.get('tags', '')
+                if 'GGn-Sorted' not in tags:
+                    filtered_torrents.append(torrent)
+            
+            logger.info(f"Retrieved {len(filtered_torrents)} unprocessed torrents (out of {len(all_torrents)} total)")
+            return filtered_torrents
         else:
             logger.error(f"Failed to get torrents: {response.status_code}")
             return None
@@ -150,6 +157,19 @@ class QBittorrentClient:
                 return False
         
         return response.status_code == 200
+    
+    def add_torrent_tags(self, hash, tags):
+        """Add tags to a specific torrent"""
+        if not self.logged_in:
+            return False
+            
+        response = self.session.post(
+            f"{self.host}/api/v2/torrents/addTags",
+            data={'hashes': hash, 'tags': tags},
+            timeout=10
+        )
+        
+        return response.status_code == 200
 
 
 class GazelleGamesAPI:
@@ -160,14 +180,14 @@ class GazelleGamesAPI:
         self.base_url = "https://gazellegames.net/api.php"
         self.session = requests.Session()
         
-    def get_torrent_group(self, torrent_hash):
-        """Get torrent group information by torrent hash"""
+    def get_torrent(self, torrent_hash):
+        """Get torrent information by torrent hash"""
         # Add rate limiting delay
         time.sleep(2)
         try:
             # Ensure hash is uppercase as required by API
             torrent_hash = torrent_hash.upper()
-            params = {'request': 'torrentgroup', 'hash': torrent_hash}
+            params = {'request': 'torrent', 'hash': torrent_hash}
             headers = {'X-API-Key': self.api_key, 'User-Agent': 'qBittorrent Category Updater v1.0'}
             
             logger.info(f"Querying GazelleGames API for torrent hash: {torrent_hash}")
@@ -211,20 +231,45 @@ def is_gazelle_games_tracker(trackers):
     return False
 
 
-def create_category(api_data):
-    """Create category string from API data: Manufacturer/Platform/GameName (Year)"""
+def create_category(api_data, torrent_hash):
+    """Create category string from API data: Manufacturer/Platform/GameName (Year)[/SubCategory]"""
     if not api_data:
         logger.debug("create_category: No API data provided")
         return None
     
     group = api_data.get('group', {})
+    torrent_data = api_data.get('torrent', {})
     logger.debug(f"create_category: Group data keys: {list(group.keys())}")
+    logger.debug(f"create_category: Torrent data keys: {list(torrent_data.keys())}")
     
     platform = group.get('platform', '').strip()
     game_name = group.get('name', 'Unknown Game')
     year = group.get('year', 'Unknown')
     
     logger.debug(f"create_category: platform='{platform}', game_name='{game_name}', year='{year}'")
+    
+    # Check for gameDOXType to determine subcategory
+    subcategory = ""
+    if torrent_data:
+        game_dox_type = torrent_data.get('gameDOXType', '').strip()
+        logger.debug(f"create_category: gameDOXType='{game_dox_type}'")
+        if game_dox_type:
+            if game_dox_type.lower() == 'update':
+                subcategory = "/Update"
+            elif game_dox_type.lower() == 'dlc':
+                subcategory = "/DLC"
+            elif game_dox_type.lower() == 'patch':
+                subcategory = "/Patch"
+            else:
+                # For other types, use the gameDOXType directly
+                clean_dox_type = re.sub(r'[<>:"/\\|?*]', '', game_dox_type)
+                subcategory = f"/{clean_dox_type}"
+        
+        logger.debug(f"create_category: subcategory='{subcategory}'")
+        clean_dox_type = re.sub(r'[<>:"/\\|?*]', '', game_dox_type)
+        subcategory = f"/{clean_dox_type}"
+        
+        logger.debug(f"create_category: gameDOXType='{game_dox_type}', subcategory='{subcategory}'")
     
     # Map platforms to manufacturers
     manufacturer_map = {
@@ -263,7 +308,7 @@ def create_category(api_data):
     # Remove any remaining problematic characters but keep basic punctuation
     clean_name = re.sub(r'[^\w\s\-\.\(\)\[\]&\']', '', clean_name)
     
-    category = f"Games/{manufacturer}/{platform}/{clean_name} ({year})"
+    category = f"Games/{manufacturer}/{platform}/{clean_name} ({year}){subcategory}"
     logger.debug(f"create_category: Created category: '{category}'")
     
     return category
@@ -315,6 +360,12 @@ def main():
     for torrent in torrents:
         hash_id = torrent.get('hash')
         name = torrent.get('name', 'Unknown')
+        current_category = torrent.get('category', '')
+        
+        # Skip torrents that already have categories assigned
+        #if current_category:
+        #    logger.debug(f"Skipping {name} - already has category: {current_category}")
+        #    continue
         
         # Check if it's from GazelleGames
         trackers = qb_client.get_torrent_trackers(hash_id)
@@ -324,14 +375,14 @@ def main():
             
             # Query GazelleGames API using torrent hash
             time.sleep(1)  # Rate limiting - wait 1 second between API calls
-            api_data = ggn_client.get_torrent_group(hash_id)
+            api_data = ggn_client.get_torrent(hash_id)
             if not api_data:
                 logger.warning(f"  Failed to get API data for torrent hash: {hash_id}")
                 continue
             
             # Create category
             try:
-                category = create_category(api_data)
+                category = create_category(api_data, hash_id)
                 if not category:
                     logger.warning(f"  Failed to create category for: {name} (category is None or empty)")
                     # Log some API data for debugging
@@ -348,6 +399,13 @@ def main():
                 # Update torrent category (will create category if it doesn't exist)
                 if qb_client.set_torrent_category(hash_id, category):
                     logger.info(f"  Successfully updated category to: {category}")
+                    
+                    # Add GGn-Sorted tag to mark as processed
+                    if qb_client.add_torrent_tags(hash_id, "GGn-Sorted"):
+                        logger.debug(f"  Added 'GGn-Sorted' tag to: {name}")
+                    else:
+                        logger.warning(f"  Failed to add 'GGn-Sorted' tag to: {name}")
+                    
                     updated_count += 1
                 else:
                     logger.error(f"  Failed to update category for: {name} - qBittorrent API call failed")
