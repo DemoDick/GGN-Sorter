@@ -266,8 +266,6 @@ def create_category(api_data, torrent_hash):
                 subcategory = f"/{clean_dox_type}"
         
         logger.debug(f"create_category: subcategory='{subcategory}'")
-        clean_dox_type = re.sub(r'[<>:"/\\|?*]', '', game_dox_type)
-        subcategory = f"/{clean_dox_type}"
         
         logger.debug(f"create_category: gameDOXType='{game_dox_type}', subcategory='{subcategory}'")
     
@@ -306,7 +304,7 @@ def create_category(api_data, torrent_hash):
     clean_name = re.sub(r'\s+', ' ', clean_name).strip()
     
     # Remove any remaining problematic characters but keep basic punctuation
-    clean_name = re.sub(r'[^\w\s\-\.\(\)\[\]&\']', '', clean_name)
+    clean_name = re.sub(r'[^\w\s\-\.\(\)\[\]&\',]', '', clean_name)
     
     category = f"Games/{manufacturer}/{platform}/{clean_name} ({year}){subcategory}"
     logger.debug(f"create_category: Created category: '{category}'")
